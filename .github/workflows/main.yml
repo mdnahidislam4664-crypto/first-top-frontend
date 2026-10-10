@@ -1,0 +1,145 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # ১. জিপ ফাইল আনজিপ করা
+      - name: Unpack ZIP File
+        run: |
+          if ls *.zip 1> /dev/null 2>&1; then
+            unzip -o *.zip
+            if [ -d first_top_app ]; then
+              cp -rf first_top_app/* .
+            fi
+          fi
+
+      # ২. অটোমেটিক কোড ফিক্স (black80 এবং মিসিং ফাইল গিটহাব নিজে ঠিক করবে)
+      - name: Auto-fix Code Errors
+        run: |
+          # black80 টাইপো ঠিক করা
+          find . -name "*.dart" -exec sed -i 's/Colors.black80/Colors.black87/g' {} + 2>/dev/null || true
+
+          # মিসিং video_feed_screen.dart তৈরি করা
+          mkdir -p lib/views/feed
+          cat << 'EOF' > lib/views/feed/video_feed_screen.dart
+          import 'package:flutter/material.dart';
+          import 'package:provider/provider.dart';
+          import '../../controllers/video_controller.dart';
+          import 'widgets/video_player_item.dart';
+
+          class VideoFeedScreen extends StatefulWidget {
+            const VideoFeedScreen({super.key});
+
+            @override
+            State<VideoFeedScreen> createState() => _VideoFeedScreenState();
+          }
+
+          class _VideoFeedScreenState extends State<VideoFeedScreen> {
+            int _currentPage = 0;
+
+            @override
+            void initState() {
+              super.initState();
+              Future.microtask(() =>
+                  Provider.of<VideoController>(context, listen: false).fetchFeed());
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              final videoController = Provider.of<VideoController>(context);
+
+              return Scaffold(
+                backgroundColor: Colors.black,
+                body: Stack(
+                  children: [
+                    videoController.isLoading
+                        ? const Center(child: CircularProgressIndicator(color: Colors.redAccent))
+                        : PageView.builder(
+                            scrollDirection: Axis.vertical,
+                            itemCount: videoController.videos.length,
+                            onPageChanged: (index) {
+                              setState(() {
+                                _currentPage = index;
+                              });
+                              videoController.onVideoSwiped(videoController.videos[index].id);
+                            },
+                            itemBuilder: (context, index) {
+                              final video = videoController.videos[index];
+                              return VideoPlayerItem(
+                                video: video,
+                                isCurrent: index == _currentPage,
+                              );
+                            },
+                          ),
+                    SafeArea(
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 10),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: const [
+                            Text(
+                              'Following',
+                              style: TextStyle(color: Colors.white60, fontSize: 16, fontWeight: FontWeight.bold),
+                            ),
+                            SizedBox(width: 20),
+                            Text(
+                              'For You',
+                              style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+          }
+          EOF
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.19.x'
+          channel: 'stable'
+
+      # ক্যামেরা প্লাগিনের জন্য minSdkVersion 21 এবং পারমিশন সেট করা
+      - name: Generate Android Platform & Permissions
+        run: |
+          if [ ! -d "android" ]; then
+            flutter create . --platforms=android --org com.firsttop --project-name first_top_app
+          fi
+          find android -name "build.gradle*" -exec sed -i 's/minSdkVersion[[:space:]=].*/minSdkVersion 21/g' {} + 2>/dev/null || true
+          find android -name "build.gradle*" -exec sed -i 's/minSdk[[:space:]=].*/minSdk = 21/g' {} + 2>/dev/null || true
+
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            sed -i '/<manifest/a \    <uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.CAMERA"/>\n    <uses-permission android:name="android.permission.RECORD_AUDIO"/>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>' "$MANIFEST"
+          fi
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Build Release APK
+        run: flutter build apk --release
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-top-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
